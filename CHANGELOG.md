@@ -4,6 +4,15 @@
 
 ## [Unreleased]
 
+### Docker 部署
+
+#### 新增的功能
+
+- **新增 Docker Compose 部署方式**：`cp .env.example .env && docker compose up -d` 起全套（PostgreSQL + artex 单二进制内嵌前端 + 记录式代理），不再需要本机装 Go / Node / PostgreSQL。新增 `Dockerfile`、`docker-compose.yml`、`docker` 部署配套 `.dockerignore` 与 `.env.example`（数据库密码等机密走 `.env`，不进镜像层）；Web/API 映射 `8787`，记录代理默认只把 `8788` 绑到宿主回环（`ARTEX_PROXY_BIND` 可改）。数据分布在 named 卷（`pgdata` / `artex_data`）持久化，`skills/` 以 bind 挂载跟随仓库更新；升级走 `docker compose pull` / `--build` + `up -d`，迁移照旧靠启动幂等建表，页面「一键更新」在容器内不作为升级依据。
+- **多架构镜像构建免 QEMU 模拟**：前端固定在 `--platform=$BUILDPLATFORM` 生成（平台无关静态产物），Go 阶段同样钉在构建机平台、按 `TARGETARCH` 交叉编译（`CGO_ENABLED=0` 纯 Go 产物），amd64/arm64 双架构只有运行时安装层按目标架构执行。`release.yml` 的 docker job 此前就引用根目录 Dockerfile 推 `autumn27/artex`，而该文件此前缺失。
+- **运行时工具链**：镜像基于 debian:bookworm-slim，预装 tini（回收 worker 的 Bash/PTY 子进程防僵尸）与渗透侦察基线（nmap / netcat / dig / whois / curl / jq / python3 / git / unzip / openssl），按需在 Dockerfile 运行层增删。
+- **构建命令可参数化**：`GOPROXY` build-arg（默认 `https://proxy.golang.org,direct`，proxy.golang.org 不可达的境内网络可在 `.env` 里切 `https://goproxy.cn,direct`，compose 会透传）、`VERSION`（打进二进制、决定自更新的可用性）、`GO_VERSION` / `NODE_VERSION`。
+
 ## [0.3.15] - 2026-10-07
 
 ### 拦截

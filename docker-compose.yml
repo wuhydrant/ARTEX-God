@@ -1,0 +1,103 @@
+# ARTEX Docker Compose 部署：PostgreSQL + artex（内嵌前端的单二进制）一键起全套，
+# 不需要本机装 Go / Node / PostgreSQL。
+#
+# 用法（在仓库根目录）：
+#   cp .env.example .env     # 至少设置 POSTGRES_PASSWORD
+#   docker compose up -d     # 首次会从源码构建镜像（可用镜像名替换，见下）
+#   → http://localhost:8787  首次进入 /setup 设置管理员密码
+#
+# 升级：`docker compose pull && docker compose up -d`（若用已发布镜像），
+#       或 `git pull && docker compose up -d --build`（源码）。数据在卷里不受影响。
+#
+# 注意：`docker compose down` 停服删容器但保留卷；`down -v` 会连数据库数据
+# 一起删掉，仅用于完全重置。
+
+name: artex
+
+services:
+  # ── PostgreSQL：双图 / 任务 / 漏洞等所有结构化数据的唯一落盘 ──────────
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-artex}
+      # .env 必填：:? 语法会在缺失时直接报错退出，而不是拿空密码起库
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请先 cp .env.example .env 并设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-artex}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # $$ 转义让健康检查在容器运行时取环境变量，而非 compose 插值
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    # 默认不把数据库端口暴露给宿主，只有 artex 能经由内部网络访问。
+    # 需要用客户端工具直连排查时解开（保证只绑回环）：
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+
+  # ── artex：后端 + 内嵌前端单二进制 + 记录式 MITM 代理 ─────────────────
+  artex:
+    # 两种取镜像方式二选一：
+    #   (a) 源码构建（默认，克隆仓库即开箱可用）：
+    build:
+      context: .
+      # Go 模块代理默认走官方源；境内网络在 .env 里设
+      # GOPROXY=https://goproxy.cn,direct 即可切换（纯 docker build 用
+      # --build-arg GOPROXY=... 传同样的值）。
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    image: artex:local
+    #   (b) 已发布镜像（免去本地构建；版本号看 GitHub Releases / Docker Hub）：
+    # image: autumn27/artex:latest
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy # 建表迁移要等库就绪再跑
+    environment:
+      # 数据库连接（优先级最高的 ARTEX_PG_DSN，免 config.json；sslmode 用
+      # disable 是因为走 compose 内部网络，不经过公网）。
+      # ARTEX_PG_DSN: postgres://artex:pass@db:5432/artex?sslmode=disable
+      ARTEX_PG_DSN: postgres://${POSTGRES_USER:-artex}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-artex}?sslmode=disable
+
+      # LLM 可不设：装好后到 UI 的「LLM 配置」页填写（写库、可多配置故障转移）。
+      # 这些变量留空也与未设置等价（FromEnv 对空串一律视为未配置），放心留空，
+      # 填到 .env 里即可生效：
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ARTEX_LLM_PROVIDER: ${ARTEX_LLM_PROVIDER:-}
+      ARTEX_LLM_MODEL: ${ARTEX_LLM_MODEL:-}
+      ARTEX_LLM_BASE_URL: ${ARTEX_LLM_BASE_URL:-}
+      ARTEX_LLM_PROXY: ${ARTEX_LLM_PROXY:-}
+
+      # 私有仓库页面一键更新时才需要（公开仓库不用）：Contents: read 令牌
+      # ARTEX_UPDATE_GITHUB_TOKEN: ${ARTEX_UPDATE_GITHUB_TOKEN:-}
+    ports:
+      # Web UI + API。默认映射宿主全部网卡；只想本机访问就加绑定：
+      # "127.0.0.1:${ARTEX_HTTP_PORT:-8787}:8787"
+      - "${ARTEX_HTTP_PORT:-8787}:8787"
+      # 记录式 MITM 代理：容器内 worker 走回环（:-proxy 的裸端口会由
+      # traffic.ProxyAddr 映射回 127.0.0.1），这里把宿主侧默认只绑回环，
+      # 便于用自己的浏览器/工具指向 HTTPS_PROXY=http://127.0.0.1:8788 录制留痕。
+      # 局域网其他机器要用时在 .env 里把 ARTEX_PROXY_BIND 改成 0.0.0.0。
+      - "${ARTEX_PROXY_BIND:-127.0.0.1}:${ARTEX_PROXY_PORT:-8788}:8788"
+    volumes:
+      # data/：SQLite 流量索引 / MITM 的 CA（/app/data/traffic/_ca/
+      # mitmproxy-ca-cert.pem，宿主客户端信任它之后，流经代理的 HTTPS 才能
+      # 被完整留痕）/ 任务工作区文件。用 named 卷持久化；换 bind 挂载也可以。
+      - artex_data:/app/data
+      # skills/：bind 挂载跟随仓库更新（git pull 后新技能目录即出现；
+      # UI 里上传的自定义技能也会写到这里，与本地部署行为一致）。
+      - ./skills:/app/skills
+    # artex 优雅关闭最多等 5s HTTPShutdown + 引擎收尾；跑着长任务的 LLM 调用
+    # 时停容要给足时间，60s 一般够引擎 drain。
+    stop_grace_period: 60s
+    # 容器内对生产资产做事会被「高危卡点 / 审批」拦截（与本地部署一致）；
+    # 容器 root 用户是为了 nmap SYN 扫描等原始套件能力，生产环境建议自行
+    # 改为非 root + 精确的 cap_add（NET_RAW / NET_ADMIN）。
+
+volumes:
+  pgdata:
+  artex_data:

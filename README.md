@@ -20,6 +20,8 @@ AI 自主渗透测试系统 ARTEX **增强**版（Go 后端 + Next.js 前端）
 
 ②下载后双击目录下install.bat即可傻瓜式一键部署安装
 
+③Docker Compose 一键起全套：`cp .env.example .env && docker compose up -d`
+
 </div>
 
 ---
@@ -94,6 +96,28 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 > 依赖数据库 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。
 
+### 方式〇：Docker Compose（推荐，连 PostgreSQL 都省了）
+
+```bash
+git clone https://github.com/Xiao1an/ARTEX-God.git
+cd ARTEX-God
+cp .env.example .env    # 编辑 .env，至少设置 POSTGRES_PASSWORD
+docker compose up -d    # 首次会从源码构建镜像（含前端），稍等几分钟
+```
+
+打开 **http://localhost:8787**（首次进入 `/setup` 设置管理员密码）。这一条命令会起两个服务：
+
+- `db`：PostgreSQL 17（数据落在 named 卷 `pgdata`）；
+- `artex`：单二进制（Go 后端 + 内嵌前端）+ 记录式 MITM 代理（数据落在 named 卷 `artex_data`；`skills/` 以 bind 挂载跟随仓库更新）。
+
+几个容器部署特有的要点：
+
+- **模块下载代理**：源码构建时若 `proxy.golang.org` 不可达（境内网络常见），在 `.env` 里设置 `GOPROXY=https://goproxy.cn,direct` 后重新 `up -d --build`。
+- **LLM**：`.env` 里填 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`（可加 `ARTEX_LLM_*`），或不填、部署后在 UI「LLM 配置」页填写。
+- **流量录制代理**（宿主 `127.0.0.1:8788`，`.env` 里 `ARTEX_PROXY_BIND` 可改绑）：对想要留痕的 HTTP(S) 客户端设置 `HTTP(S)_PROXY=http://127.0.0.1:8788` 并信任容器里的自签 CA（`docker compose exec artex cat /app/data/traffic/_ca/mitmproxy-ca-cert.pem`）；容器内 worker 的流量自动走代理，无需配置。
+- **工具链**：worker 的 Bash 工具在容器这台“主机”上执行，镜像预装 nmap / curl / dig / nc / python3 / git 等侦察基线；要加工具就改 `Dockerfile` 的运行时层（apt 一行一个）重新 `docker compose up -d --build`。
+- **升级 / 回滚**见[更新升级](#更新升级)的 Docker 说明；`docker compose down` 保留数据卷，`down -v` 才会删库。
+
 ### 方式一：一键安装脚本（推荐）
 
 ```bash
@@ -156,6 +180,8 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 ## 更新升级
 
 > 升级只换程序、不动数据：`./data`（jwt.key / SQLite 等）、`./skills` 与你的 PostgreSQL 都会保留。**数据库迁移无需手动执行**——`artex` 每次启动会幂等重跑 `schema.sql`（含 `ADD COLUMN` / `CREATE INDEX IF NOT EXISTS`），即“重启即迁移”。升级前仍建议先备份 `./data` 与数据库。
+>
+> **Docker Compose 部署**：升级走镜像而不走页面更新——`git pull && docker compose up -d --build`（源码方式）或 `docker compose pull && docker compose up -d`（已发布镜像方式）。数据在卷里不动，迁移照旧靠重启幂等建表。页面「一键更新」在容器内只替换当前容器里的二进制，容器一旦重建就被镜像版本覆盖，请勿依赖。
 
 ### 本仓库的私有 Release 更新源
 
